@@ -108,14 +108,13 @@ impl Bank {
 
     /// Allows the user to set a new password. Rehashes the user and stores the user under the new hash.
     pub fn change_password(&mut self, user: HashResult, new_password: String) -> BankResult<()> {
-        let user_data = match self.users.get(&user) {
+        let user_data = match self.users.remove(&user) {
             Some(u) => Ok(u),
             None => Err(BankingError::NoUserFound),
         }?;
         let name = user_data.username.clone();
         let new_hash = Self::hash(&name, &new_password);
-        self.users.insert(new_hash, user_data.clone());
-        self.users.remove(&user);
+        self.users.insert(new_hash, user_data);
         Ok(())
     }
 
@@ -217,9 +216,9 @@ impl Bank {
     /// If the transfer brings the account's balance below ED, the account will be reaped.
     ///
     /// Requires both the current and target user to be `Customer` role.
-    pub fn transfer(&mut self, user: HashResult, amount: Balance, user_id: u64) -> BankResult<()> {
+    pub fn transfer(&mut self, user: HashResult, amount: Balance, target: u64) -> BankResult<()> {
         let id = self.assert_role(user, Role::Customer)?;
-        if id == user_id {
+        if id == target {
             return Ok(());
         }
         if amount <= 0f64 {
@@ -233,9 +232,9 @@ impl Bank {
         let mut to_user_balance = match self
             .users
             .iter()
-            .find(|(_, user)| user.id == user_id && user.role == Role::Customer)
+            .find(|(_, user)| user.id == target && user.role == Role::Customer)
         {
-            Some(_) => Ok(self.balances.get(&user_id).copied().unwrap_or_default()),
+            Some(_) => Ok(self.balances.get(&target).copied().unwrap_or_default()),
             None => Err(BankingError::InvalidUserId),
         }?;
 
@@ -269,11 +268,11 @@ impl Bank {
 
         // Inserts the `to` user's balance into the hashmap.
         to_user_balance += amount;
-        self.balances.insert(user_id, to_user_balance);
+        self.balances.insert(target, to_user_balance);
 
         self.deposit_event(Event::Transfer {
             id,
-            to_id: user_id,
+            to_id: target,
             amount,
         });
         Ok(())
@@ -352,11 +351,14 @@ impl Bank {
         self.balances
             .iter_mut()
             .map(|(id, balance)| {
-                let new_balance = *balance * rate;
-                if *balance <= Balance::MAX / (1f64 + rate) {
-                    *balance *= 1f64 + rate;
-                }
-                (*id, new_balance)
+                let new_balance = if *balance > Balance::MAX / (1f64 + rate){
+                    Balance::MAX
+                } else {
+                    *balance * (1f64 + rate)
+                };
+                let interest = new_balance - *balance;
+                *balance = new_balance;
+                (*id, interest)
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -385,9 +387,9 @@ impl Bank {
         self.balances
             .iter_mut()
             .map(|(id, balance)| {
-                let new_balance = *balance * rate;
+                let tax = *balance * rate;
                 *balance *= 1f64 - rate;
-                (*id, *balance, new_balance)
+                (*id, *balance, tax)
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -405,19 +407,19 @@ impl Bank {
     }
 
     // Helper function that iterates all events of a given user and prints them to the console.
-    fn iter_event(&self, id: UserId) {
+    fn iter_event(&self, target_id: UserId) {
         self.events.iter().for_each(|e| {
             if match e {
-                Event::Deposit { id: event_id, .. } if *event_id == id => true,
-                Event::Withdrawal { id: event_id, .. } if *event_id == id => true,
-                Event::AccountReaped { id: event_id, .. } if *event_id == id => true,
+                Event::Deposit { id: event_id, .. } if *event_id == target_id => true,
+                Event::Withdrawal { id: event_id, .. } if *event_id == target_id => true,
+                Event::AccountReaped { id: event_id, .. } if *event_id == target_id => true,
                 Event::Transfer {
                     id: event_id,
                     to_id,
                     amount: _,
-                } if *event_id == id || *to_id == id => true,
-                Event::Interest { id: event_id, .. } if *event_id == id => true,
-                Event::Tax { id: event_id, .. } if *event_id == id => true,
+                } if *event_id == target_id || *to_id == target_id => true,
+                Event::Interest { id: event_id, .. } if *event_id == target_id => true,
+                Event::Tax { id: event_id, .. } if *event_id == target_id => true,
                 _ => false,
             } {
                 println!("{}", e);
